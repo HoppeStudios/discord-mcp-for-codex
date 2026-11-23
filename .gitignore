@@ -8,3 +8,5 @@ yarn-error.log*
 *.dpapi
 manifest.json
 bot_requests/
+__pycache__/
+*.pyc

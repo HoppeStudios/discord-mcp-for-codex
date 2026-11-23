@@ -1,9 +1,11 @@
 # Discord MCP for Codex
 
-A local stdio MCP server for a Discord **bot account**. Read channels and send
-verified messages as the bot. No npm dependencies, gateway, telemetry, network
-listener or startup updater. Requires a maintained Node.js version at least
-24.22.3 and a legitimate Discord bot token.
+A local stdio MCP integration with two explicit senders. **Personal account
+messages use the Discord web UI through the dedicated Firefox profile by
+default.** Bot API tools remain available only when the bot is explicitly chosen.
+Neither mode extracts a personal account token. The browser adapter is not an
+official personal account API. No telemetry, scheduled sender or startup updater
+is installed.
 
 This HoppeStudios fork starts from
 [sashakang/discord-mcp-for-codex](https://github.com/sashakang/discord-mcp-for-codex)
@@ -13,10 +15,73 @@ and Sasha Kang's copyright notice are retained in [LICENSE](LICENSE).
 
 ## Identity and access
 
+The personal adapter reads the visible account panel and checks the expected
+username before every submission. It only uses the existing browser skill's
+reviewed UI helper. It never reads cookies, private account stores, authorization
+headers or tokens and exposes no generic script or account API tool. A missing
+session requires manual sign in to the same dedicated profile. The manual Firefox
+profile, real mouse, keyboard, clipboard and foreground remain untouched.
+
 The bot has its own name, permissions and DM conversations. It cannot read your
 personal account DM history or send as you. Never use a personal account token.
 Discord documents [bot authentication](https://docs.discord.com/developers/reference#authentication)
 and [prohibits self bots](https://support.discord.com/hc/en-us/articles/115002192352).
+
+## Personal browser adapter
+
+This mode requires the installed `discord-messages` skill with its existing
+`scripts/send_discord_message.py`, the dedicated `firefox_existing` registration
+using its headless `codex-mcp-profile`, and the reviewed Python environment which
+already provides the MCP SDK. No new Python package is downloaded by installation.
+Use the exact pinned Python executable already registered for that local setup:
+
+```powershell
+.\scripts\install-browser-windows.ps1 -PythonExe 'C:\path\to\reviewed\python.exe'
+```
+
+The installer adds `discord_personal`, preserves every other MCP setting including
+the optional bot, and makes personal browser messaging the skill's default. It
+records hashes of the adapter, helper and Python executable plus the MCP SDK
+version. The installed launcher checks them before startup. The adapter serializes
+calls and uses a filesystem lock. A busy profile or stale lock stops the operation
+without killing another browser or taking over desktop input.
+For a reviewed upgrade use a new installation path and `-PreviousInstallDir` to
+identify the existing registration exactly. Preserve processes still using the
+previous payload and remove that directory once no process or registration needs
+it. Do not keep an unused rollback installation.
+
+Tools are `personal_identity`, `find_conversations`, `inspect_conversation`,
+`prepare_personal_message`, `send_personal_message` and
+`verify_personal_delivery`. Lookup is limited to
+visible recent DM links and does not prove that absent conversations do not exist.
+Before a send verify the exact route, recipient, visible account username and
+composer label. Each send requires a stable request ID and exact user authorization.
+Preparation only fills the first planned part and never submits it.
+
+The original helper preserves existing drafts, splits long Unicode messages below
+1800 UTF-16 units, reads back exact text and records a pending receipt before Enter.
+Each part is submitted once and the same message ID must survive reload. Browser
+and helper share the existing local receipt store. Sender metadata binds adapter
+requests to the observed account. Unknown delivery, legacy receipts and stale locks
+stop for inspection. Do not change request IDs or transports to evade them.
+`verify_personal_delivery` can reconcile an existing pending receipt through
+one exact visible history match by the expected author and a second reload of
+the same message ID. It never submits and stops on ambiguity. This also handles
+an optimistic UI message ID being replaced before persistence verification.
+
+The helper remains installed once in the existing skill. Its source is not copied
+into this public fork. See [the personal workflow](integration/browser-workflow.md).
+
+```sh
+python -m unittest discover -s scripts -p '*_test.py'
+```
+
+The personal adapter tests use local fixtures only. They cover sender changes,
+recipient guards, draft preservation, receipt reuse, unknown delivery, preparation,
+legacy receipt stops, exact content forwarding and helper hash verification.
+Live acceptance requires testing the actual installed launcher and logged-in UI.
+
+## Optional bot setup
 
 Create an application in the [Discord Developer Portal](https://discord.com/developers/applications),
 add its bot and save the token locally. Invite it only to an authorized server.
@@ -27,6 +92,9 @@ message content may require the Message Content privileged intent. Bot DMs depen
 on recipient privacy, Discord policy and shared context. They are not guaranteed.
 
 ## Windows installation
+
+This section installs the optional bot transport. Personal messaging uses the
+browser adapter installation above and requires no bot token.
 
 Review this source and run the tests before installing. Obtain an exact supported
 Node release from [nodejs.org](https://nodejs.org/en/download). Verify the official
