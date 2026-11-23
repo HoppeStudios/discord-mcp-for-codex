@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 
 import readline from "node:readline";
+import { pathToFileURL } from 'node:url';
+import { createDiscordClient, sendSafely, snowflake } from './safe-messaging.mjs';
+const client = createDiscordClient();
 
-const API_BASE = "https://discord.com/api/v10";
+
 const SERVER_INFO = {
   name: "local-discord-bot-mcp",
-  version: "1.0.0"
+  version: "0.2.0"
 };
 
 const tools = [
@@ -162,44 +165,34 @@ const tools = [
   }
 ];
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  crlfDelay: Infinity
-});
-
-rl.on("line", async (line) => {
-  if (!line.trim()) return;
-
-  let request;
-  try {
-    request = JSON.parse(line);
-  } catch {
-    writeMessage({
-      jsonrpc: "2.0",
-      id: null,
-      error: { code: -32700, message: "Parse error" }
-    });
-    return;
+for (const tool of tools) {
+  const readOnly = ['bot_identity','list_guilds','list_channels','read_messages','get_channel'].includes(tool.name);
+  tool.annotations = {readOnlyHint:readOnly, destructiveHint:false, idempotentHint:readOnly, openWorldHint:true};
+  if (['send_message','send_dm'].includes(tool.name)) {
+    tool.inputSchema.properties.request_id = {type:'string', description:'Stable unique operation ID. Reuse on retries; never replace an uncertain receipt.'};
+    tool.inputSchema.required.push('request_id');
+    tool.description += ' Posts as the bot. Splits long text, suppresses all mentions, persists receipts and verifies message IDs. Requires user authorization.';
   }
+}
+tools.push({name:'get_channel', description:'Inspect a channel or bot DM by ID, including its name, guild and recipients. Verify the destination before sending.', annotations:{readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:true}, inputSchema:{type:'object', properties:{channel_id:{type:'string'}},required:['channel_id'],additionalProperties:false}});
 
-  if (!("id" in request)) {
-    return;
-  }
-
-  try {
-    const result = await handleRequest(request);
-    writeMessage({ jsonrpc: "2.0", id: request.id, result });
-  } catch (error) {
-    writeMessage({
-      jsonrpc: "2.0",
-      id: request.id,
-      error: {
-        code: error.code || -32000,
-        message: error.message || "Internal error"
-      }
-    });
-  }
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const rl = readline.createInterface({input:process.stdin, crlfDelay:Infinity});
+  // Keep writes in order. A mutation is never automatically retried.
+  let pending = Promise.resolve();
+  rl.on('line', line => { pending = pending.then(async () => {
+    if (!line.trim()) return;
+    let request;
+    try { request = JSON.parse(line); }
+    catch { writeMessage({jsonrpc:'2.0',id:null,error:{code:-32700,message:'Parse error'}}); return; }
+    if (!request || typeof request !== 'object' || Array.isArray(request) || request.jsonrpc !== '2.0' || typeof request.method !== 'string') {
+      writeMessage({jsonrpc:'2.0',id:null,error:{code:-32600,message:'Invalid request'}}); return;
+    }
+    if (!('id' in request)) return;
+    try { writeMessage({jsonrpc:'2.0',id:request.id,result:await handleRequest(request)}); }
+    catch(error) { writeMessage({jsonrpc:'2.0',id:request.id,error:{code:error.code || -32000,message:error.message || 'Internal error'}}); }
+  }); });
+}
 
 async function handleRequest(request) {
   switch (request.method) {
@@ -214,19 +207,33 @@ async function handleRequest(request) {
     case "tools/list":
       return { tools };
     case "tools/call":
-      return callTool(request.params || {});
+      try { return await callTool(request.params || {}); }
+      catch (error) {
+        if (error.code === -32602) throw error;
+        return {isError:true,content:[{type:'text',text:error.message || 'Tool failed.'}]};
+      }
     default:
       throw jsonRpcError(-32601, `Method not found: ${request.method}`);
   }
 }
 
-async function callTool(params) {
+export async function callTool(params) {
   const name = params.name;
   const args = params.arguments || {};
 
+  const tool = tools.find(t=>t.name===name);
+  if (!tool) throw jsonRpcError(-32602, 'Unknown tool.');
+  if (!args || typeof args !== 'object' || Array.isArray(args)) throw jsonRpcError(-32602, 'Arguments must be an object.');
+  for (const key of Object.keys(args)) if (!(key in tool.inputSchema.properties)) throw jsonRpcError(-32602, 'Unexpected argument.');
+  for (const key of tool.inputSchema.required || []) requireString(args,key);
+  for (const key of ['guild_id','channel_id','user_id']) if (key in args) snowflake(args[key]);
+  for (const [key,value] of Object.entries(args)) if (tool.inputSchema.properties[key]?.type === 'string' && typeof value !== 'string') throw jsonRpcError(-32602,'Expected a string.');
+  if (args.limit !== undefined && (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 100)) throw jsonRpcError(-32602,'limit must be an integer from 1 to 100.');
   switch (name) {
     case "bot_identity":
-      return textResult(await discord("GET", "/users/@me"));
+      return textResult(await client.identity());
+    case "get_channel":
+      return textResult(await discord('GET', '/channels/' + args.channel_id));
     case "list_guilds":
       return textResult(await discord("GET", "/users/@me/guilds"));
     case "list_channels":
@@ -239,26 +246,16 @@ async function callTool(params) {
         await discord("GET", `/channels/${args.channel_id}/messages?limit=${limit}`)
       );
     }
-    case "send_message":
-      requireString(args, "channel_id");
-      requireString(args, "content");
-      return textResult(
-        await discord("POST", `/channels/${args.channel_id}/messages`, {
-          content: args.content
-        })
-      );
+    case 'send_message':
+      return textResult(await sendSafely({client, channelId:args.channel_id, content:args.content, requestId:args.request_id}));
     case "create_dm_channel":
       requireString(args, "user_id");
       return textResult(await createDmChannel(args.user_id));
-    case "send_dm": {
-      requireString(args, "user_id");
-      requireString(args, "content");
+    case 'send_dm': {
+      if (process.env.DISCORD_ALLOW_SEND !== '1') throw Error('Sending is disabled.');
       const channel = await createDmChannel(args.user_id);
-      return textResult(
-        await discord("POST", `/channels/${channel.id}/messages`, {
-          content: args.content
-        })
-      );
+      if (channel.type !== 1 || channel.recipients?.length !== 1 || channel.recipients[0].id !== args.user_id) throw Error('DM recipient verification failed.');
+      return textResult(await sendSafely({client, channelId:channel.id, content:args.content, requestId:args.request_id}));
     }
     case "read_dm_messages": {
       requireString(args, "user_id");
@@ -269,6 +266,7 @@ async function callTool(params) {
       );
     }
     case "create_text_channel":
+      if (process.env.DISCORD_ALLOW_CHANNEL_CREATE !== '1') throw Error('Channel creation is disabled.');
       requireString(args, "guild_id");
       requireString(args, "name");
       return textResult(
@@ -290,30 +288,8 @@ async function createDmChannel(userId) {
 }
 
 async function discord(method, path, body) {
-  const token = process.env.DISCORD_BOT_TOKEN || process.env.DISCORD_TOKEN;
-  if (!token) {
-    throw jsonRpcError(
-      -32001,
-      "Missing DISCORD_BOT_TOKEN or DISCORD_TOKEN environment variable."
-    );
-  }
-
-  const response = await fetch(`${API_BASE}${path}`, {
-    method,
-    headers: {
-      Authorization: `Bot ${token}`,
-      "Content-Type": "application/json"
-    },
-    body: body ? JSON.stringify(body) : undefined
-  });
-
-  const responseBody = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const details = responseBody.message ? `: ${responseBody.message}` : "";
-    throw jsonRpcError(-32002, `Discord API ${response.status}${details}`);
-  }
-
-  return responseBody;
+  await client.identity();
+  return client.request(method,path,body);
 }
 
 function textResult(value) {

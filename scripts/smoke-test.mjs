@@ -13,7 +13,8 @@ const expectedTools = new Set([
   "create_dm_channel",
   "send_dm",
   "read_dm_messages",
-  "create_text_channel"
+  "create_text_channel",
+  "get_channel"
 ]);
 
 const child = spawn(process.execPath, ["./discord-mcp.mjs"], {
@@ -61,6 +62,11 @@ for (const tool of expectedTools) {
   if (!actualTools.has(tool)) {
     throw new Error(`Missing expected tool: ${tool}`);
   }
+}
+
+const sends = toolsList.result.tools.filter(tool => ['send_message','send_dm'].includes(tool.name));
+if (sends.some(tool => !tool.inputSchema.required.includes('request_id') || tool.annotations.readOnlyHint !== false)) {
+  throw new Error('Send tools must require a stable request ID and advertise mutation.');
 }
 
 console.log(`Smoke test passed: ${actualTools.size} tools advertised.`);

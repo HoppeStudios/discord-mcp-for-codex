@@ -5,3 +5,8 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .DS_Store
+*.dpapi
+manifest.json
+bot_requests/
+__pycache__/
+*.pyc
